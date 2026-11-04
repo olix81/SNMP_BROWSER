@@ -1,0 +1,86 @@
+RT1170-AGENT-MIB DEFINITIONS ::= BEGIN
+
+IMPORTS
+    MODULE-IDENTITY, OBJECT-TYPE, NOTIFICATION-TYPE, Integer32, enterprises
+        FROM SNMPv2-SMI
+    TruthValue
+        FROM SNMPv2-TC
+    MODULE-COMPLIANCE, OBJECT-GROUP, NOTIFICATION-GROUP
+        FROM SNMPv2-CONF;
+
+rt1170Agent MODULE-IDENTITY
+    LAST-UPDATED "202610170000Z"
+    ORGANIZATION "Example"
+    CONTACT-INFO "admin@example.com"
+    DESCRIPTION
+        "Private objects of the PHYTEC phyCORE-i.MX RT1170 SNMPv3 agent.
+
+         NOTE: enterprise number 26381 is the lwIP project's PEN, used as a
+         placeholder. Replace it with your own IANA Private Enterprise Number
+         (and APP_SNMP_ENTERPRISE_ID in app_config.h) before deployment."
+    REVISION "202610170000Z"
+    DESCRIPTION "Initial version: LED control."
+    ::= { enterprises 26381 1 }
+
+rt1170AgentNotifications OBJECT IDENTIFIER ::= { rt1170Agent 0 }
+rt1170AgentObjects       OBJECT IDENTIFIER ::= { rt1170Agent 1 }
+rt1170AgentConformance   OBJECT IDENTIFIER ::= { rt1170Agent 2 }
+
+-- LED
+
+ledBlinkEnable OBJECT-TYPE
+    SYNTAX      TruthValue
+    MAX-ACCESS  read-write
+    STATUS      current
+    DESCRIPTION "true: LED1 blinks; false: LED1 is off. Not persistent."
+    ::= { rt1170AgentObjects 1 }
+
+ledBlinkPeriod OBJECT-TYPE
+    SYNTAX      Integer32 (50..10000)
+    UNITS       "milliseconds"
+    MAX-ACCESS  read-write
+    STATUS      current
+    DESCRIPTION "Full blink period of LED1 (on + off). Not persistent."
+    ::= { rt1170AgentObjects 2 }
+
+ledState OBJECT-TYPE
+    SYNTAX      INTEGER { on(1), off(2) }
+    MAX-ACCESS  read-only
+    STATUS      current
+    DESCRIPTION "Current state of LED1."
+    ::= { rt1170AgentObjects 3 }
+
+-- Notifications
+
+ledConfigChanged NOTIFICATION-TYPE
+    OBJECTS     { ledBlinkEnable, ledBlinkPeriod }
+    STATUS      current
+    DESCRIPTION "Sent (as SNMPv2c trap) after ledBlinkEnable or ledBlinkPeriod
+                 is changed, via SNMP or the web page."
+    ::= { rt1170AgentNotifications 1 }
+
+-- Conformance
+
+rt1170AgentGroups      OBJECT IDENTIFIER ::= { rt1170AgentConformance 1 }
+rt1170AgentCompliances OBJECT IDENTIFIER ::= { rt1170AgentConformance 2 }
+
+rt1170LedGroup OBJECT-GROUP
+    OBJECTS     { ledBlinkEnable, ledBlinkPeriod, ledState }
+    STATUS      current
+    DESCRIPTION "LED control objects."
+    ::= { rt1170AgentGroups 1 }
+
+rt1170NotificationGroup NOTIFICATION-GROUP
+    NOTIFICATIONS { ledConfigChanged }
+    STATUS      current
+    DESCRIPTION "Notifications."
+    ::= { rt1170AgentGroups 2 }
+
+rt1170AgentCompliance MODULE-COMPLIANCE
+    STATUS      current
+    DESCRIPTION "Compliance statement for the RT1170 agent."
+    MODULE
+        MANDATORY-GROUPS { rt1170LedGroup, rt1170NotificationGroup }
+    ::= { rt1170AgentCompliances 1 }
+
+END
