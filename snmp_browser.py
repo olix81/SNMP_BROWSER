@@ -17,6 +17,7 @@ from tkinter import ttk, filedialog, messagebox, simpledialog
 from snmp_core import (AgentConfig, SnmpClient, Cancelled, VERSIONS, SECURITY_LEVELS,
                        AUTH_PROTOCOLS, PRIV_PROTOCOLS)
 from mib_store import MibStore, DEFAULT_MIBS, oid_str
+from trap_receiver import TrapReceiver, TrapUser, ReceiverConfig, new_engine_id
 
 APP_NAME = "SNMP MIB Browser"
 APP_DIR = Path(__file__).resolve().parent
@@ -79,6 +80,9 @@ class App(tk.Tk):
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.after(40, self._poll_queue)
         self.load_mibs_async(self.settings.get("mibs") or list(DEFAULT_MIBS), initial=True)
+        self.trap_window = None
+        if self.settings.get("trap_receiver", {}).get("autostart"):
+            self.after(300, lambda: self.show_traps(start=True, focus=False))
 
     # ================================================================ UI
 
@@ -101,12 +105,17 @@ class App(tk.Tk):
         o.add_checkbutton(label="Ricorda le password v3 (salvate in chiaro)", variable=self.v_save_secrets)
         m.add_cascade(label="Opzioni", menu=o)
 
+        t = tk.Menu(m, tearoff=False)
+        t.add_command(label="Ricevitore trap…", command=self.show_traps, accelerator="Ctrl+T")
+        m.add_cascade(label="Trap", menu=t)
+
         h = tk.Menu(m, tearoff=False)
         h.add_command(label="Informazioni", command=self.show_about)
         m.add_cascade(label="Aiuto", menu=h)
         self.config(menu=m)
         self.bind("<Control-o>", lambda e: self.load_mib_files())
         self.bind("<Control-s>", lambda e: self.export_csv())
+        self.bind("<Control-t>", lambda e: self.show_traps())
 
     def _build_agent_panel(self):
         self.vars = {f.name: tk.StringVar() for f in fields(AgentConfig)}
@@ -788,7 +797,24 @@ class App(tk.Tk):
             f"{APP_NAME}\n\nSNMP v1 / v2c / v3 (USM: MD5, SHA, SHA-2; DES, 3DES, AES-128/192/256)\n"
             f"Basato su pysnmp e pysmi.\n\nCartella dati: {DATA_DIR}", parent=self)
 
+    def show_traps(self, start=False, focus=True):
+        if self.trap_window is None:
+            self.trap_window = TrapWindow(self)
+            if "SNMP-COMMUNITY-MIB" not in self.mibs.builder.mibSymbols:  # nomi dei campi delle trap v1
+                self.load_mibs_async(["SNMP-COMMUNITY-MIB"])
+        w = self.trap_window
+        if focus:
+            w.deiconify()
+            w.lift()
+        else:
+            w.withdraw()
+        if start and not w.receiver.running:
+            w.start(quiet=not focus)
+
     def _on_close(self):
+        if self.trap_window is not None:
+            self.trap_window.save_settings()
+            self.trap_window.receiver.stop()
         try:
             cfg = self.read_config()
             self.settings["agent"] = cfg.to_dict(include_secrets=self.v_save_secrets.get())
@@ -986,6 +1012,381 @@ class TableView(tk.Toplevel):
         if self.stop_event is not None:
             self.stop_event.set()
         self.destroy()
+
+
+class TrapWindow(tk.Toplevel):
+    MAX_EVENTS = 5000
+
+    def __init__(self, app: App):
+        super().__init__(app)
+        self.app = app
+        self.title("Ricevitore trap SNMP")
+        self.geometry("1100x640")
+        self.protocol("WM_DELETE_WINDOW", self.withdraw)  # chiudere la finestra non ferma la ricezione
+        s = app.settings.get("trap_receiver", {})
+        if not s.get("engine_id"):
+            s["engine_id"] = new_engine_id()  # stabile tra i riavvii: i dispositivi lo usano per gli inform v3
+        app.settings["trap_receiver"] = s
+        self.users = [TrapUser.from_dict(u) for u in app.settings.get("trap_users", [])]
+        self.events = []  # TrapEvent oppure (ora, sorgente, motivo) per i messaggi scartati
+        self.receiver = TrapReceiver(
+            lambda ev: app.call_soon(self.add_event, ev),
+            lambda src, why: app.call_soon(self.add_drop, src, why))
+
+        self.v_addr = tk.StringVar(value=s.get("address", "0.0.0.0"))
+        self.v_port = tk.StringVar(value=str(s.get("port", 162)))
+        self.v_comm = tk.StringVar(value=s.get("communities", "public"))
+        self.v_auto = tk.BooleanVar(value=s.get("autostart", False))
+        self.v_follow = tk.BooleanVar(value=True)
+        self.v_state = tk.StringVar(value="Fermo")
+
+        top = ttk.Frame(self, padding=(8, 6))
+        top.pack(fill="x")
+        ttk.Label(top, text="Indirizzo:").pack(side="left")
+        ttk.Entry(top, textvariable=self.v_addr, width=16).pack(side="left", padx=(2, 10))
+        ttk.Label(top, text="Porta:").pack(side="left")
+        ttk.Entry(top, textvariable=self.v_port, width=6).pack(side="left", padx=(2, 10))
+        ttk.Label(top, text="Community (vuoto = qualsiasi):").pack(side="left")
+        ttk.Entry(top, textvariable=self.v_comm, width=20).pack(side="left", padx=(2, 10))
+        ttk.Button(top, text="Utenti v3…", command=self.edit_users).pack(side="left", padx=2)
+        self.start_btn = ttk.Button(top, text="Avvia", command=self.toggle, width=8)
+        self.start_btn.pack(side="left", padx=(10, 2))
+        self.state_lbl = ttk.Label(top, textvariable=self.v_state, foreground="#b00020")
+        self.state_lbl.pack(side="left", padx=6)
+        ttk.Checkbutton(top, text="Avvia all'apertura del programma", variable=self.v_auto).pack(side="right")
+
+        eng = ttk.Frame(self, padding=(8, 0, 8, 4))
+        eng.pack(fill="x")
+        ttk.Label(eng, text="Engine ID del ricevitore (per gli inform v3):").pack(side="left")
+        self.v_engine = tk.StringVar(value=s["engine_id"])
+        ttk.Entry(eng, textvariable=self.v_engine, width=36, state="readonly").pack(side="left", padx=4)
+        ttk.Button(eng, text="Copia", command=lambda: app._clip(self.v_engine.get())).pack(side="left")
+        self.v_users_info = tk.StringVar()
+        ttk.Label(eng, textvariable=self.v_users_info, foreground="#555").pack(side="left", padx=12)
+        self._update_users_info()
+
+        pw = ttk.PanedWindow(self, orient="vertical")
+        pw.pack(fill="both", expand=True, padx=8)
+
+        lf = ttk.Frame(pw)
+        cols = ("time", "source", "ver", "pdu", "sec", "trap")
+        self.list = ttk.Treeview(lf, columns=cols, show="headings", selectmode="browse")
+        for c, t, w in zip(cols, ("Ora", "Sorgente", "Ver.", "Tipo", "Sicurezza", "Trap"),
+                           (140, 150, 45, 70, 200, 420)):
+            self.list.heading(c, text=t)
+            self.list.column(c, width=w, stretch=(c == "trap"))
+        ys = ttk.Scrollbar(lf, orient="vertical", command=self.list.yview)
+        self.list.configure(yscrollcommand=ys.set)
+        self.list.pack(side="left", fill="both", expand=True)
+        ys.pack(side="right", fill="y")
+        self.list.tag_configure("drop", foreground="#b00020")
+        self.list.tag_configure("inform", foreground="#0b5cad")
+        self.list.bind("<<TreeviewSelect>>", self._on_select)
+        pw.add(lf, weight=3)
+
+        df = ttk.Frame(pw)
+        self.v_title = tk.StringVar()
+        ttk.Label(df, textvariable=self.v_title, wraplength=1050, justify="left",
+                  padding=(0, 4)).pack(fill="x")
+        vf = ttk.Frame(df)
+        vf.pack(fill="both", expand=True)
+        vcols = ("name", "value", "type")
+        self.vb = ttk.Treeview(vf, columns=vcols, show="headings", height=7)
+        for c, t, w in zip(vcols, ("Nome", "Valore", "Tipo"), (320, 520, 180)):
+            self.vb.heading(c, text=t)
+            self.vb.column(c, width=w, stretch=(c == "value"))
+        vys = ttk.Scrollbar(vf, orient="vertical", command=self.vb.yview)
+        self.vb.configure(yscrollcommand=vys.set)
+        self.vb.pack(side="left", fill="both", expand=True)
+        vys.pack(side="right", fill="y")
+        pw.add(df, weight=2)
+
+        bot = ttk.Frame(self, padding=(8, 4))
+        bot.pack(fill="x")
+        ttk.Button(bot, text="Pulisci", command=self.clear).pack(side="left")
+        ttk.Button(bot, text="Esporta CSV…", command=self.export).pack(side="left", padx=4)
+        ttk.Checkbutton(bot, text="Segui le nuove trap", variable=self.v_follow).pack(side="left", padx=8)
+        self.v_count = tk.StringVar(value="0 trap")
+        ttk.Label(bot, textvariable=self.v_count).pack(side="right")
+
+    # --- configurazione ---------------------------------------------------------
+
+    def _config(self):
+        try:
+            port = int(self.v_port.get())
+        except ValueError:
+            raise ValueError("Porta non valida") from None
+        return ReceiverConfig(self.v_addr.get().strip() or "0.0.0.0", port, self.v_comm.get(),
+                              self.v_engine.get())
+
+    def save_settings(self):
+        s = self.app.settings.setdefault("trap_receiver", {})
+        s.update(address=self.v_addr.get().strip(), port=self.v_port.get().strip(),
+                 communities=self.v_comm.get(), autostart=self.v_auto.get(), engine_id=self.v_engine.get())
+        secrets = self.app.v_save_secrets.get()
+        self.app.settings["trap_users"] = [u.to_dict(include_secrets=secrets) for u in self.users]
+
+    def _update_users_info(self):
+        n = len(self.users)
+        self.v_users_info.set(f"{n} utent{'e' if n == 1 else 'i'} v3 configurat{'o' if n == 1 else 'i'}"
+                              if n else "Nessun utente v3: le trap v3 verranno scartate")
+
+    def edit_users(self):
+        TrapUsersDialog(self)
+
+    def users_changed(self):
+        self._update_users_info()
+        self.save_settings()
+        if self.receiver.running:
+            self.start()  # riavvio per applicare i nuovi utenti
+
+    # --- avvio / arresto -----------------------------------------------------------
+
+    def toggle(self):
+        if self.receiver.running:
+            self.stop()
+        else:
+            self.start()
+
+    def start(self, quiet=False):
+        missing = [u.name for u in self.users if u.security_level != "noAuthNoPriv" and not u.auth_password]
+        try:
+            cfg = self._config()
+            self.receiver.start(cfg, self.users)
+        except Exception as exc:
+            self._set_state(False, "Errore")
+            self.app._status(f"Ricevitore trap: {one_line(str(exc))}")
+            if not quiet:
+                messagebox.showerror("Ricevitore trap", str(exc), parent=self)
+            return
+        self.save_settings()
+        where = f"{cfg.address}:{cfg.port}"
+        self._set_state(True, f"In ascolto su {where}")
+        self.app._status(f"Ricevitore trap in ascolto su {where}")
+        if missing and not quiet:
+            messagebox.showwarning("Ricevitore trap", "Utenti v3 senza password (non salvate): "
+                                   + ", ".join(missing) + "\nReinserirle in 'Utenti v3…'.", parent=self)
+
+    def stop(self):
+        self.receiver.stop()
+        self._set_state(False, "Fermo")
+        self.app._status("Ricevitore trap fermato")
+
+    def _set_state(self, running, text):
+        self.v_state.set(("● " if running else "") + text)
+        self.state_lbl.configure(foreground="#127a3a" if running else "#b00020")
+        self.start_btn.configure(text="Ferma" if running else "Avvia")
+
+    # --- eventi ----------------------------------------------------------------------
+
+    def _trap_name(self, trap_oid):
+        return self.app.mibs.name_of(trap_oid) if trap_oid else "—"
+
+    def add_event(self, ev):
+        name = self._trap_name(ev.trap_oid)
+        self._append(ev, (time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ev.time)), ev.source, ev.version,
+                          ev.pdu, ev.security, name), "inform" if ev.pdu == "Inform" else "")
+        if not self.winfo_viewable():
+            self.app._status(f"{ev.pdu} {ev.version} da {ev.source}: {name}")
+
+    def add_drop(self, source, reason):
+        now = time.time()
+        self._append((now, source, reason), (time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now)), source,
+                                             "", "Scartato", "", reason), "drop")
+        if not self.winfo_viewable():
+            self.app._status(f"Trap da {source} scartata: {reason}")
+
+    def _append(self, item, values, tag):
+        self.events.append(item)
+        iid = self.list.insert("", "end", values=values, tags=(tag,) if tag else ())
+        if len(self.events) > self.MAX_EVENTS:
+            self.events.pop(0)
+            self.list.delete(self.list.get_children()[0])
+        if self.v_follow.get():
+            self.list.selection_set(iid)
+            self.list.see(iid)
+        traps = sum(1 for e in self.events if not isinstance(e, tuple))
+        self.v_count.set(f"{traps} trap, {len(self.events) - traps} scartate")
+
+    def _on_select(self, _e=None):
+        sel = self.list.selection()
+        if not sel:
+            return
+        ev = self.events[self.list.index(sel[0])]
+        self.vb.delete(*self.vb.get_children())
+        if isinstance(ev, tuple):
+            self.v_title.set(f"Messaggio scartato da {ev[1]}: {ev[2]}")
+            return
+        mibs = self.app.mibs
+        title = f"{ev.pdu} {ev.version} da {ev.source} — {self._trap_name(ev.trap_oid)}"
+        if ev.context:
+            title += f"   (context '{ev.context}')"
+        node, _ = mibs.best_node(ev.trap_oid) if ev.trap_oid else (None, ())
+        if node is not None and node.kind == "notification":
+            desc = dict(mibs.describe(node.oid)).get("Descrizione")
+            if desc:
+                title += "\n" + (desc if len(desc) < 400 else desc[:400] + "…")
+        self.v_title.set(title)
+        for oid, value in ev.var_binds:
+            text, type_name = mibs.format_value(oid, value)
+            self.vb.insert("", "end", values=(mibs.name_of(oid), one_line(text), type_name))
+
+    def clear(self):
+        self.events.clear()
+        self.list.delete(*self.list.get_children())
+        self.vb.delete(*self.vb.get_children())
+        self.v_title.set("")
+        self.v_count.set("0 trap")
+
+    def export(self):
+        if not self.events:
+            return
+        path = filedialog.asksaveasfilename(parent=self, defaultextension=".csv", filetypes=[("CSV", "*.csv")],
+                                            initialfile="trap.csv")
+        if not path:
+            return
+        mibs = self.app.mibs
+        with open(path, "w", newline="", encoding="utf-8-sig") as fh:
+            w = csv.writer(fh, delimiter=";")
+            w.writerow(["Ora", "Sorgente", "Versione", "Tipo", "Sicurezza", "Trap", "Variabili"])
+            for ev in self.events:
+                if isinstance(ev, tuple):
+                    w.writerow([time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ev[0])), ev[1], "", "Scartato",
+                                "", ev[2], ""])
+                    continue
+                vbs = " | ".join(f"{mibs.name_of(o)} = {mibs.format_value(o, v)[0]}" for o, v in ev.var_binds)
+                w.writerow([time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ev.time)), ev.source, ev.version,
+                            ev.pdu, ev.security, self._trap_name(ev.trap_oid), vbs])
+
+
+class TrapUsersDialog(tk.Toplevel):
+    def __init__(self, win: TrapWindow):
+        super().__init__(win)
+        self.win = win
+        self.title("Utenti SNMPv3 per le trap")
+        self.transient(win)
+        self.geometry("760x420")
+        frm = ttk.Frame(self, padding=8)
+        frm.pack(fill="both", expand=True)
+
+        cols = ("name", "level", "auth", "priv", "engine")
+        self.tv = ttk.Treeview(frm, columns=cols, show="headings", height=8, selectmode="browse")
+        for c, t, w in zip(cols, ("Utente", "Livello", "Auth", "Priv", "Engine ID mittente"),
+                           (140, 110, 80, 110, 260)):
+            self.tv.heading(c, text=t)
+            self.tv.column(c, width=w)
+        self.tv.pack(fill="both", expand=True)
+        self.tv.bind("<<TreeviewSelect>>", self._on_select)
+
+        f = ttk.LabelFrame(frm, text="Utente", padding=6)
+        f.pack(fill="x", pady=(8, 0))
+        self.v = {k: tk.StringVar() for k in ("name", "security_level", "auth_protocol", "auth_password",
+                                              "priv_protocol", "priv_password", "engine_id")}
+        self.v["security_level"].set("authPriv")
+        self.v["auth_protocol"].set("SHA")
+        self.v["priv_protocol"].set("AES-128")
+        ttk.Label(f, text="Nome:").grid(row=0, column=0, sticky="e")
+        ttk.Entry(f, textvariable=self.v["name"], width=18).grid(row=0, column=1, sticky="w", padx=(2, 10))
+        ttk.Label(f, text="Livello:").grid(row=0, column=2, sticky="e")
+        lvl = ttk.Combobox(f, textvariable=self.v["security_level"], values=SECURITY_LEVELS, state="readonly",
+                           width=13)
+        lvl.grid(row=0, column=3, sticky="w", padx=(2, 10))
+        lvl.bind("<<ComboboxSelected>>", lambda e: self._update_state())
+        ttk.Label(f, text="Engine ID mittente (hex):").grid(row=0, column=4, sticky="e")
+        ttk.Entry(f, textvariable=self.v["engine_id"], width=26).grid(row=0, column=5, sticky="w", padx=2)
+        ttk.Label(f, text="Autenticazione:").grid(row=1, column=0, sticky="e", pady=(4, 0))
+        self.auth = ttk.Combobox(f, textvariable=self.v["auth_protocol"], values=list(AUTH_PROTOCOLS),
+                                 state="readonly", width=10)
+        self.auth.grid(row=1, column=1, sticky="w", padx=(2, 10), pady=(4, 0))
+        ttk.Label(f, text="Password auth:").grid(row=1, column=2, sticky="e", pady=(4, 0))
+        self.auth_pw = ttk.Entry(f, textvariable=self.v["auth_password"], width=16, show="•")
+        self.auth_pw.grid(row=1, column=3, sticky="w", padx=(2, 10), pady=(4, 0))
+        ttk.Label(f, text="Privacy:").grid(row=2, column=0, sticky="e", pady=(4, 0))
+        self.priv = ttk.Combobox(f, textvariable=self.v["priv_protocol"], values=list(PRIV_PROTOCOLS),
+                                 state="readonly", width=14)
+        self.priv.grid(row=2, column=1, sticky="w", padx=(2, 10), pady=(4, 0))
+        ttk.Label(f, text="Password priv:").grid(row=2, column=2, sticky="e", pady=(4, 0))
+        self.priv_pw = ttk.Entry(f, textvariable=self.v["priv_password"], width=16, show="•")
+        self.priv_pw.grid(row=2, column=3, sticky="w", padx=(2, 10), pady=(4, 0))
+        ttk.Label(f, text="Engine ID vuoto = accetta trap da qualsiasi dispositivo\n"
+                          "(l'engine ID viene appreso dai pacchetti ricevuti).",
+                  foreground="#666").grid(row=1, column=4, rowspan=2, columnspan=2, sticky="w", padx=(10, 0))
+
+        bf = ttk.Frame(frm)
+        bf.pack(fill="x", pady=(8, 0))
+        ttk.Button(bf, text="Aggiungi / Aggiorna", command=self.save_user).pack(side="left")
+        ttk.Button(bf, text="Rimuovi", command=self.remove).pack(side="left", padx=4)
+        ttk.Button(bf, text="Chiudi", command=self.destroy).pack(side="right")
+        if not win.app.v_save_secrets.get():
+            ttk.Label(bf, text="Password conservate solo per questa sessione (Opzioni → Ricorda le password).",
+                      foreground="#777").pack(side="left", padx=10)
+        self._refresh()
+        self._update_state()
+
+    def _refresh(self):
+        self.tv.delete(*self.tv.get_children())
+        for u in self.win.users:
+            auth = u.auth_protocol if u.security_level != "noAuthNoPriv" else "—"
+            priv = u.priv_protocol if u.security_level == "authPriv" else "—"
+            self.tv.insert("", "end", values=(u.name, u.security_level, auth, priv, u.engine_id or "(qualsiasi)"))
+
+    def _update_state(self):
+        lvl = self.v["security_level"].get()
+        a = lvl in ("authNoPriv", "authPriv")
+        p = lvl == "authPriv"
+        self.auth.configure(state="readonly" if a else "disabled")
+        self.auth_pw.configure(state="normal" if a else "disabled")
+        self.priv.configure(state="readonly" if p else "disabled")
+        self.priv_pw.configure(state="normal" if p else "disabled")
+
+    def _on_select(self, _e=None):
+        sel = self.tv.selection()
+        if not sel:
+            return
+        u = self.win.users[self.tv.index(sel[0])]
+        for k in self.v:
+            self.v[k].set(getattr(u, k))
+        self._update_state()
+
+    def save_user(self):
+        d = {k: (var.get() if "password" in k else var.get().strip()) for k, var in self.v.items()}
+        lvl = d["security_level"]
+        err = None
+        if not d["name"]:
+            err = "Specificare il nome utente"
+        elif lvl != "noAuthNoPriv" and len(d["auth_password"]) < 8:
+            err = "La password di autenticazione deve avere almeno 8 caratteri"
+        elif lvl == "authPriv" and len(d["priv_password"]) < 8:
+            err = "La password di privacy deve avere almeno 8 caratteri"
+        elif d["engine_id"]:
+            h = d["engine_id"].replace(":", "").replace(" ", "")
+            h = h[2:] if h.lower().startswith("0x") else h
+            try:
+                bytes.fromhex(h)
+                d["engine_id"] = h.lower()
+                if not 5 <= len(h) // 2 <= 32:
+                    err = "L'engine ID deve essere lungo da 5 a 32 byte"
+            except ValueError:
+                err = "Engine ID non valido (esadecimale)"
+        if err:
+            messagebox.showerror("Utente v3", err, parent=self)
+            return
+        user = TrapUser.from_dict(d)
+        users = self.win.users
+        idx = next((i for i, u in enumerate(users) if u.name == user.name), None)
+        if idx is None:
+            users.append(user)
+        else:
+            users[idx] = user
+        self._refresh()
+        self.win.users_changed()
+
+    def remove(self):
+        sel = self.tv.selection()
+        if sel:
+            del self.win.users[self.tv.index(sel[0])]
+            self._refresh()
+            self.win.users_changed()
 
 
 def main():

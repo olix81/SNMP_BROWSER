@@ -26,6 +26,23 @@ oppure doppio clic su `run.bat` (installa le dipendenze se mancano).
 Il campo OID accetta OID numerici (`1.3.6.1.2.1.1.1.0`), nomi (`sysDescr.0`) o nomi qualificati
 (`IF-MIB::ifDescr.2`). Il Get su un nodo scalare aggiunge automaticamente `.0`.
 
+## Ricezione trap
+
+`Trap → Ricevitore trap…` (Ctrl+T) riceve trap **v1, v2c, v3** e **inform v2c/v3** (con risposta automatica).
+
+- Porta predefinita 162 (configurabile); se è occupata, di solito è il servizio Windows "SNMP Trap".
+- Community accettate separate da virgola; campo vuoto = qualsiasi.
+- Utenti v3 (`Utenti v3…`): lasciando vuoto l'engine ID del mittente, l'utente vale per qualsiasi
+  dispositivo e l'engine ID viene appreso dal primo pacchetto ricevuto. Per gli inform v3 il dispositivo
+  usa l'engine ID del ricevitore, mostrato nella finestra (resta uguale tra i riavvii).
+- Le trap scartate compaiono in rosso con il motivo (community errata, utente sconosciuto,
+  password auth/priv errate, …).
+- Trap e variabili sono decodificate con le MIB caricate; esportazione CSV; opzione di avvio automatico.
+- Chiudere la finestra non ferma la ricezione: le nuove trap vengono segnalate nella barra di stato.
+
+`python test_trap_sender.py [host] [porta]` invia trap/inform di prova di tutte le versioni
+(utente v3 `trapuser`, SHA/AES-128, password `authkey1`/`privkey1`).
+
 ## MIB non conformi
 
 All'importazione di un file MIB ne viene creata una copia corretta, perché il compilatore
