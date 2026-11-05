@@ -66,6 +66,22 @@ Tutto viene salvato in `data/` accanto al programma:
 - `data/compiled/` MIB compilate (cache)
 - `data/settings.json` ultima configurazione (le password v3 solo se abilitato in Opzioni)
 
+Con l'eseguibile la cartella dati è:
+- Windows: `data\` accanto a `SNMPBrowser.exe`
+- macOS: `~/Library/Application Support/SNMPBrowser/`
+
+## Eseguibile
+
+Va creato sul sistema di destinazione (niente cross-compilazione):
+- **Windows**: `build_windows.bat` → `dist\SNMPBrowser\SNMPBrowser.exe` (distribuire tutta la cartella)
+- **macOS**: `chmod +x build_mac.sh && ./build_mac.sh` → `dist/SNMPBrowser.app`
+  (serve Python da python.org, oppure Homebrew + `brew install python-tk`).
+  App non firmata: al primo avvio tasto destro → Apri, oppure
+  `xattr -dr com.apple.quarantine SNMPBrowser.app`.
+- **GitHub Actions** (`.github/workflows/build.yml`): a ogni push su `main` crea gli zip per
+  Windows, macOS Apple Silicon e macOS Intel (scheda *Actions* → run → *Artifacts*).
+  Con un tag `v*` (es. `git tag v1.0.0 && git push --tags`) li allega anche a una Release.
+
 ## Agent di test
 
 `python test_agent.py` avvia un agent locale su `127.0.0.1:1161` con community `public`/`private`

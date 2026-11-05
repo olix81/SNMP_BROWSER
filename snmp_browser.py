@@ -20,8 +20,38 @@ from mib_store import MibStore, DEFAULT_MIBS, oid_str
 from trap_receiver import TrapReceiver, TrapUser, ReceiverConfig, new_engine_id
 
 APP_NAME = "SNMP MIB Browser"
-APP_DIR = Path(__file__).resolve().parent
-DATA_DIR = APP_DIR / "data"
+FROZEN = getattr(sys, "frozen", False)  # True quando gira come eseguibile PyInstaller
+
+
+def _data_dir() -> Path:
+    if not FROZEN:
+        return Path(__file__).resolve().parent / "data"
+    if sys.platform == "darwin":
+        # dentro il bundle .app non si deve scrivere
+        return Path.home() / "Library" / "Application Support" / "SNMPBrowser"
+    if sys.platform == "win32":
+        return Path(sys.executable).resolve().parent / "data"  # versione "portable"
+    return Path.home() / ".local" / "share" / "SNMPBrowser"
+
+
+def _seed_data_dir(dest: Path):
+    """Al primo avvio dell'eseguibile copia le MIB incluse nel pacchetto nella cartella dati."""
+    if not FROZEN:
+        return
+    import shutil
+    bundled = Path(getattr(sys, "_MEIPASS", Path(sys.executable).parent)) / "data"
+    if not bundled.is_dir() or bundled.resolve() == dest.resolve():
+        return
+    for src in bundled.rglob("*"):
+        if src.is_file():
+            target = dest / src.relative_to(bundled)
+            if not target.exists():
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src, target)
+
+
+DATA_DIR = _data_dir()
+_seed_data_dir(DATA_DIR)
 SETTINGS_FILE = DATA_DIR / "settings.json"
 
 TREE_COLORS = {

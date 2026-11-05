@@ -1,0 +1,52 @@
+name: Build eseguibili
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            artifact: SNMPBrowser-windows
+          - os: macos-latest      # Apple Silicon (arm64)
+            artifact: SNMPBrowser-macos-arm64
+          - os: macos-15-intel    # Intel (x86_64)
+            artifact: SNMPBrowser-macos-intel
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Installa dipendenze
+        run: python -m pip install -r requirements.txt pyinstaller
+
+      - name: Build
+        run: python -m PyInstaller --noconfirm --clean SNMPBrowser.spec
+
+      - name: Archivia (macOS)
+        if: runner.os == 'macOS'
+        run: cd dist && ditto -c -k --keepParent SNMPBrowser.app ../${{ matrix.artifact }}.zip
+
+      - name: Archivia (Windows)
+        if: runner.os == 'Windows'
+        run: Compress-Archive -Path dist/SNMPBrowser -DestinationPath ${{ matrix.artifact }}.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}.zip
+
+      - name: Allega alla release (solo tag v*)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ matrix.artifact }}.zip
