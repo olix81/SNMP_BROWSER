@@ -80,7 +80,7 @@ def one_line(text):
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title(APP_NAME)
+        self.title(f"{APP_NAME} {__version__}")
         self.settings = load_settings()
         self.geometry(self.settings.get("geometry", "1280x800"))
         self.minsize(900, 560)
@@ -825,8 +825,9 @@ class App(tk.Tk):
     def show_about(self):
         messagebox.showinfo(
             "Informazioni",
-            f"{APP_NAME}\n\nSNMP v1 / v2c / v3 (USM: MD5, SHA, SHA-2; DES, 3DES, AES-128/192/256)\n"
-            f"Basato su pysnmp e pysmi.\n\nCartella dati: {DATA_DIR}", parent=self)
+            f"{APP_NAME}\nVersione {__version__}\n\n"
+            f"SNMP v1 / v2c / v3 (USM: MD5, SHA, SHA-2; DES, 3DES, AES-128/192/256)\n"
+            f"Basato su pysnmp e pysmi.\nLicenza MIT.\n\nCartella dati: {DATA_DIR}", parent=self)
 
     def show_traps(self, start=False, focus=True):
         if self.trap_window is None:
