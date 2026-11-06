@@ -153,7 +153,7 @@ class MibStore:
                         self.builder.load_modules(alt)
                         name = alt
                     except Exception as exc2:
-                        errors[name] = str(exc2) or exc2.__class__.__name__
+                        errors[name] = self._describe_error(name, str(exc2) or exc2.__class__.__name__)
                         continue
                 if name not in self.builder.mibSymbols:  # caricato tramite file con altra capitalizzazione
                     name = self._module_name_ci(name) or name
@@ -162,6 +162,41 @@ class MibStore:
                     self.loaded.append(name)
             self._nodes = self._by_label = None
         return ok, errors
+
+    def _is_available(self, module):
+        """True se il modulo è già disponibile compilato in una delle sorgenti di pysnmp."""
+        for src in self.builder.get_mib_sources():
+            try:
+                src.read(module)
+                return True
+            except Exception:
+                continue
+        return False
+
+    def _describe_error(self, module, msg):
+        """Traduce l'errore grezzo di pysmi/pysnmp in un messaggio comprensibile."""
+        # la coda "caused by <MibNotFoundError>: ... search path (...)" è solo una conseguenza
+        core = msg.split(" caused by ", 1)[0]
+        core = core.split(" compilation error(s): ", 1)[-1]
+
+        missing = []
+        for dep in re.findall(r"([A-Za-z][\w-]*): missing", core) + re.findall(r'no module "([\w-]+)"', core):
+            if dep not in missing:
+                missing.append(dep)
+        if module in missing or (self._module_name_ci(module) or module) in missing:
+            return (f"File sorgente di {module} non trovato.\n"
+                    f"Copia il file MIB in:\n{self.src_dir}")
+        missing = [m for m in missing if not self._is_available(m)]
+        if missing:
+            return ("Mancano le MIB da cui questo modulo importa:\n"
+                    + "\n".join(f"  • {m}" for m in missing)
+                    + f"\n\nProcurale (di solito dal fornitore dell'apparato) e copiale in:\n{self.src_dir}")
+
+        m = re.search(r"Bad grammar near (?:token .*? |offset \d+ )?at MIB ([\w-]+), line (\d+)", core)
+        if m:
+            return (f"Errore di sintassi nel file {m.group(1)}.mib alla riga {m.group(2)}.\n"
+                    f"File: {self.src_dir / (m.group(1) + '.mib')}")
+        return core
 
     def import_file(self, path):
         """Importa un file MIB nella cartella sorgenti, correggendone maiuscole/minuscole e caratteri

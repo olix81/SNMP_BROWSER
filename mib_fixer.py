@@ -32,6 +32,10 @@ KEYWORD_MAP = {k.lower(): k for k in KEYWORDS}
 TYPE_KEYWORDS = {"Integer32", "Unsigned32", "Counter32", "Counter64", "Gauge32", "TimeTicks", "IpAddress",
                  "Opaque", "Counter", "Gauge", "NetworkAddress", "INTEGER", "BITS"}
 
+# tipi di base definiti in SNMPv2-SMI: molte MIB li usano senza importarli
+SMI_BASE_TYPES = ("Integer32", "Unsigned32", "Counter32", "Counter64", "Gauge32", "TimeTicks",
+                  "IpAddress", "Opaque")
+
 TOKEN_RE = re.compile(
     r'(?P<comment>--.*?(?:--|$))'
     r'|(?P<string>"[^"]*")'
@@ -90,6 +94,7 @@ def fix_mib(text, symbols_of=None, module_name_of=None):
     depth = 0
     seq_depth = None         # profondità del blocco SEQUENCE { ... } corrente
     in_imports = False
+    imports_j = smi_from_j = None  # posizione di IMPORTS e del FROM SNMPv2-SMI
     in_macro = False
     defval_depth = None
     enum_labels = []
@@ -121,10 +126,13 @@ def fix_mib(text, symbols_of=None, module_name_of=None):
         up = canon(t)
         if up == "IMPORTS":
             in_imports = True
+            imports_j = j
             continue
         if in_imports:
             if up == "FROM":
                 module = s(j + 1)
+                if module == "SNMPv2-SMI" and pending:
+                    smi_from_j = j
                 for sym in pending:
                     imports[sym] = module
                 pending = []
@@ -265,6 +273,27 @@ def fix_mib(text, symbols_of=None, module_name_of=None):
             if (t, new) not in seen:
                 seen.add((t, new))
                 changes.append((line_of[idx], t, new))
+        # "SYNTAX BITS" senza l'elenco { nome(n), ... } non è SMI valido: sul filo BITS viaggia
+        # come OCTET STRING, quindi la sostituzione non cambia i valori scambiati con l'agent
+        if toks[idx][1] == "BITS" and s(j - 1) == "SYNTAX" and s(j + 1) != "{":
+            toks[idx][1] = "OCTET STRING"
+            changes.append((line_of[idx], "SYNTAX BITS (senza elenco bit)", "SYNTAX OCTET STRING"))
+
+    # --- 4. tipi di base SMI usati ma non importati ----------------------------------------
+    missing = {}  # tipo -> riga del primo utilizzo
+    for j, idx in enumerate(sig):
+        t = toks[idx][1]
+        if (ctx[j] == "type" and t in SMI_BASE_TYPES and t not in imports
+                and t not in type_defs and t not in missing):
+            missing[t] = line_of[idx]
+    if missing and imports_j is not None:
+        names = [t for t in SMI_BASE_TYPES if t in missing]
+        if smi_from_j is not None:
+            toks[sig[smi_from_j - 1]][1] += ", " + ", ".join(names)
+        else:
+            toks[sig[imports_j]][1] += "\n    " + ", ".join(names) + " FROM SNMPv2-SMI"
+        for name in names:
+            changes.append((missing[name], f"{name} (non importato)", f"{name} FROM SNMPv2-SMI"))
     return "".join(t for _, t in toks), changes
 
 
