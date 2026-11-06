@@ -20,6 +20,7 @@ from mib_store import MibStore, DEFAULT_MIBS, oid_str
 from trap_receiver import TrapReceiver, TrapUser, ReceiverConfig, new_engine_id
 
 APP_NAME = "SNMP MIB Browser"
+__version__ = "1.0.0"  # unica fonte della versione (letta anche da SNMPBrowser.spec)
 FROZEN = getattr(sys, "frozen", False)  # True quando gira come eseguibile PyInstaller
 
 

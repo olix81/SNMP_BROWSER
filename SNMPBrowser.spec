@@ -1,8 +1,11 @@
 # -*- mode: python ; coding: utf-8 -*-
 # Build:  python -m PyInstaller --noconfirm SNMPBrowser.spec
 # Funziona sia su Windows (dist/SNMPBrowser/SNMPBrowser.exe) sia su macOS (dist/SNMPBrowser.app).
+import re
 import sys
 from PyInstaller.utils.hooks import collect_all
+
+VERSION = re.search(r'^__version__ = "([^"]+)"', open("snmp_browser.py", encoding="utf-8").read(), re.M).group(1)
 
 datas, binaries, hiddenimports = [], [], []
 for pkg in ("pysnmp", "pysmi"):
@@ -50,7 +53,8 @@ if sys.platform == "darwin":
         bundle_identifier="com.olix.snmpbrowser",
         info_plist={
             "CFBundleDisplayName": "SNMP MIB Browser",
-            "CFBundleShortVersionString": "1.0.0",
+            "CFBundleShortVersionString": VERSION,
+            "CFBundleVersion": VERSION,
             "NSHighResolutionCapable": True,
         },
     )

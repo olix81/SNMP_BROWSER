@@ -86,3 +86,8 @@ Va creato sul sistema di destinazione (niente cross-compilazione):
 
 `python test_agent.py` avvia un agent locale su `127.0.0.1:1161` con community `public`/`private`
 e diversi utenti v3 (password `authkey1` / `privkey1`): vedi l'intestazione del file.
+
+## Licenza
+
+Distribuito con licenza [MIT](LICENSE). Le dipendenze (pysnmp, pysmi, cryptography) hanno
+licenze proprie (BSD / Apache 2.0).
