@@ -4,3 +4,7 @@ venv/
 .venv/
 build/
 dist/
+data/
+.history/
+data/settings.json
+data/settings.json
